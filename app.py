@@ -91,6 +91,9 @@ def parse_command(text: str) -> tuple[str, str]:
     """
     t = text.strip()
 
+    if not t:
+        return ("help", "")
+
     # 追蹤 <stock_id>
     m = re.match(r"^追蹤\s+(\w+)$", t)
     if m:
@@ -137,18 +140,15 @@ async def handle_command(command: str, arg: str, user_id: str, reply_token: str)
         line_api = AsyncMessagingApi(api_client)
 
         if command == "track":
-            added = watchlist.add_stock(user_id, arg)
-            if added:
-                reply = f"已將 {arg} 加入追蹤清單"
+            if not re.match(r"^\d{4,6}$", arg):
+                reply = f"股票代號格式不正確：{arg}（請輸入 4-6 位數字，例如 2330）"
             else:
-                reply = f"{arg} 已在追蹤清單中"
+                added = watchlist.add_stock(user_id, arg)
+                reply = f"已將 {arg} 加入追蹤清單" if added else f"{arg} 已在追蹤清單中"
 
         elif command == "untrack":
             removed = watchlist.remove_stock(user_id, arg)
-            if removed:
-                reply = f"已將 {arg} 從追蹤清單移除"
-            else:
-                reply = f"{arg} 不在追蹤清單中"
+            reply = f"已將 {arg} 從追蹤清單移除" if removed else f"{arg} 不在追蹤清單中"
 
         elif command == "list":
             stocks = watchlist.list_stocks(user_id)
