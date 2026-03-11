@@ -52,7 +52,7 @@ def create_agent() -> tuple[Agent[StockDeps, AnalysisResult], SkillsToolset]:
     """Create stock analysis agent."""
     model = get_model()
 
-    executor = LocalSkillScriptExecutor(timeout=120)
+    executor = LocalSkillScriptExecutor(timeout=180)
     skills_dir = SkillsDirectory(path=SKILLS_DIR, script_executor=executor)
     skills_toolset = SkillsToolset(directories=[skills_dir])
 
