@@ -35,7 +35,10 @@ async def scrape():
         sys.exit(1)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
         context = await browser.new_context(
             storage_state=state_path,
             viewport={"width": 1920, "height": 1080},
