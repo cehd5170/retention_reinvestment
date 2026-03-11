@@ -2,27 +2,13 @@
 """Log into Retention & Reinvestment Table using saved cookies and scrape all stocks' expensive/cheap prices from the Watchlist."""
 
 import json
-import os
 import sys
 import asyncio
-import tempfile
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-STORAGE_STATE_PATH = Path(__file__).resolve().parents[3] / "storage_state.json"
-
-
-def get_storage_state_path() -> str:
-    """Return path to storage_state.json, creating from env var if needed."""
-    if STORAGE_STATE_PATH.exists():
-        return str(STORAGE_STATE_PATH)
-    env_data = os.environ.get("STORAGE_STATE")
-    if env_data:
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        tmp.write(env_data)
-        tmp.close()
-        return tmp.name
-    return ""
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from utils.storage import get_storage_state_path
 
 
 async def scrape():

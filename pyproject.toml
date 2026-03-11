@@ -11,5 +11,6 @@ dependencies = [
     "pydantic-ai>=1.67.0",
     "pydantic-ai-skills>=0.5.1",
     "python-dotenv>=1.2.2",
+    "supabase>=2.15.0",
     "uvicorn>=0.41.0",
 ]
