@@ -8,16 +8,32 @@ Uses the Screener page's global search autocomplete:
 """
 
 import json
+import os
 import sys
 import asyncio
+import tempfile
 from pathlib import Path
 from playwright.async_api import async_playwright
 
 STORAGE_STATE_PATH = Path(__file__).resolve().parents[3] / "storage_state.json"
 
 
+def get_storage_state_path() -> str:
+    """Return path to storage_state.json, creating from env var if needed."""
+    if STORAGE_STATE_PATH.exists():
+        return str(STORAGE_STATE_PATH)
+    env_data = os.environ.get("STORAGE_STATE")
+    if env_data:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        tmp.write(env_data)
+        tmp.close()
+        return tmp.name
+    return ""
+
+
 async def search(stock_id: str):
-    if not STORAGE_STATE_PATH.exists():
+    state_path = get_storage_state_path()
+    if not state_path:
         print(json.dumps({
             "status": "error",
             "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"
@@ -27,7 +43,7 @@ async def search(stock_id: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            storage_state=str(STORAGE_STATE_PATH),
+            storage_state=state_path,
             viewport={"width": 1920, "height": 1080},
         )
         page = await context.new_page()
