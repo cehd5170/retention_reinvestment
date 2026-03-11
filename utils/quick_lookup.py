@@ -6,9 +6,12 @@ prices programmatically. ~20-30 seconds instead of ~180 seconds.
 
 import asyncio
 import json
+import logging
+import shutil
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 
 
@@ -30,6 +33,7 @@ async def _run_script(cmd: list[str], timeout: int = 90) -> dict | list | None:
     err_output = stderr.decode().strip()
 
     if proc.returncode != 0:
+        logger.error(f"Script failed (exit {proc.returncode}): cmd={cmd}, stderr={err_output[-500:]}")
         # Try to parse JSON error from stdout first
         if output:
             try:
@@ -54,12 +58,16 @@ async def quick_analyze(stock_ids: list[str]) -> str:
     search_script = str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
     price_script = str(SKILLS_DIR / "get-stock-price" / "scripts" / "get_price.py")
 
+    # Use sys.executable (the running Python) for subprocesses
+    python = sys.executable
+    logger.info(f"quick_analyze: python={python}, stock_ids={stock_ids}")
+
     # Run all lookups in parallel
     search_tasks = [
-        _run_script(["uv", "run", "python", search_script, "--stock-id", sid])
+        _run_script([python, search_script, "--stock-id", sid])
         for sid in stock_ids
     ]
-    price_args = ["uv", "run", "python", price_script]
+    price_args = [python, price_script]
     for sid in stock_ids:
         price_args.extend(["--stock-id", sid])
     price_task = _run_script(price_args)
