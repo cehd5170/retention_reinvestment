@@ -1,0 +1,19 @@
+name: Daily Stock Notification
+
+on:
+  schedule:
+    # Every weekday at 9:00 AM Taiwan time (UTC+8) = 1:00 AM UTC
+    - cron: '0 0  * * 1-5'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger daily notification
+        run: |
+          curl -X POST "${{ secrets.RENDER_APP_URL }}/cron/notify" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --max-time 300 \
+            --retry 2

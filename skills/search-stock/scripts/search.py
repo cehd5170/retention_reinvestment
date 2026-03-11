@@ -8,27 +8,13 @@ Uses the Screener page's global search autocomplete:
 """
 
 import json
-import os
 import sys
 import asyncio
-import tempfile
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-STORAGE_STATE_PATH = Path(__file__).resolve().parents[3] / "storage_state.json"
-
-
-def get_storage_state_path() -> str:
-    """Return path to storage_state.json, creating from env var if needed."""
-    if STORAGE_STATE_PATH.exists():
-        return str(STORAGE_STATE_PATH)
-    env_data = os.environ.get("STORAGE_STATE")
-    if env_data:
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        tmp.write(env_data)
-        tmp.close()
-        return tmp.name
-    return ""
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from utils.storage import get_storage_state_path
 
 
 async def search(stock_id: str):
@@ -65,7 +51,7 @@ async def search(stock_id: str):
 
             # Type stock ID character by character in search bar to trigger autocomplete
             await page.click("#ctl00_txtGlobalSearch")
-            await page.type("#ctl00_txtGlobalSearch", stock_id, delay=80)
+            await page.type("#ctl00_txtGlobalSearch", stock_id, delay=20)
 
             # Wait for autocomplete dropdown and find the [TW] item
             tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')

@@ -16,3 +16,10 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 # Retention & Reinvestment Table
 STOCK_EMAIL = os.getenv("STOCKEMAIL", "")
 STOCK_PASSWORD = os.getenv("STOCKEMAILPASSWORD", "")
+
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_PUBLICKEY", "")
+
+# Cron secret (prevent unauthorized access to /cron/notify)
+CRON_SECRET = os.getenv("CRON_SECRET", "")
