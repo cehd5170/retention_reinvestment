@@ -6,14 +6,13 @@ prices programmatically. ~20-30 seconds instead of ~180 seconds.
 
 import asyncio
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 
 
-async def _run_script(cmd: list[str], timeout: int = 60) -> dict | list | None:
+async def _run_script(cmd: list[str], timeout: int = 90) -> dict | list | None:
     """Run a skill script as subprocess and parse JSON output."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -25,29 +24,42 @@ async def _run_script(cmd: list[str], timeout: int = 60) -> dict | list | None:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
-        return None
+        return {"status": "error", "message": "查詢逾時（超過 90 秒）"}
+
+    output = stdout.decode().strip()
+    err_output = stderr.decode().strip()
 
     if proc.returncode != 0:
-        return None
+        # Try to parse JSON error from stdout first
+        if output:
+            try:
+                return json.loads(output)
+            except json.JSONDecodeError:
+                pass
+        # Fall back to stderr
+        msg = err_output.split("\n")[-1] if err_output else f"腳本執行失敗 (exit code {proc.returncode})"
+        return {"status": "error", "message": msg}
+
+    if not output:
+        return {"status": "error", "message": "腳本無輸出"}
 
     try:
-        return json.loads(stdout.decode())
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+        return json.loads(output)
+    except json.JSONDecodeError:
+        return {"status": "error", "message": f"無法解析輸出: {output[:200]}"}
 
 
 async def quick_analyze(stock_ids: list[str]) -> str:
     """Analyze stocks directly without LLM. Returns formatted text."""
-    python = sys.executable
     search_script = str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
     price_script = str(SKILLS_DIR / "get-stock-price" / "scripts" / "get_price.py")
 
     # Run all lookups in parallel
     search_tasks = [
-        _run_script([python, search_script, "--stock-id", sid])
+        _run_script(["uv", "run", "python", search_script, "--stock-id", sid])
         for sid in stock_ids
     ]
-    price_args = [python, price_script]
+    price_args = ["uv", "run", "python", price_script]
     for sid in stock_ids:
         price_args.extend(["--stock-id", sid])
     price_task = _run_script(price_args)
@@ -67,8 +79,8 @@ async def quick_analyze(stock_ids: list[str]) -> str:
     # Format output
     lines = []
     for sid, search in zip(stock_ids, search_results):
-        if not search or isinstance(search, dict) and search.get("status") == "error":
-            err_msg = search.get("message", "查詢失敗") if search else "查詢逾時"
+        if not search or (isinstance(search, dict) and search.get("status") == "error"):
+            err_msg = search.get("message", "查詢失敗") if search else "未知錯誤"
             lines.append(f"❌ {sid}: {err_msg}")
             lines.append("")
             continue
