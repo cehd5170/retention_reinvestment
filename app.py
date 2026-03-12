@@ -154,29 +154,33 @@ async def handle_command(command: str, arg: str, user_id: str, reply_token: str)
     async with AsyncApiClient(app.state.line_config) as api_client:
         line_api = AsyncMessagingApi(api_client)
 
-        if command == "track":
-            if not re.match(r"^\d{4,6}$", arg):
-                reply = f"股票代號格式不正確：{arg}（請輸入 4-6 位數字，例如 2330）"
+        try:
+            if command == "track":
+                if not re.match(r"^\d{4,6}$", arg):
+                    reply = f"股票代號格式不正確：{arg}（請輸入 4-6 位數字，例如 2330）"
+                else:
+                    added = watchlist.add_stock(user_id, arg)
+                    reply = f"已將 {arg} 加入追蹤清單" if added else f"{arg} 已在追蹤清單中"
+
+            elif command == "untrack":
+                removed = watchlist.remove_stock(user_id, arg)
+                reply = f"已將 {arg} 從追蹤清單移除" if removed else f"{arg} 不在追蹤清單中"
+
+            elif command == "list":
+                stocks = watchlist.list_stocks(user_id)
+                if stocks:
+                    reply = "你的追蹤清單：\n" + "\n".join(f"• {s}" for s in stocks)
+                else:
+                    reply = "追蹤清單是空的。輸入「追蹤 2330」來新增。"
+
+            elif command == "help":
+                reply = HELP_TEXT
+
             else:
-                added = watchlist.add_stock(user_id, arg)
-                reply = f"已將 {arg} 加入追蹤清單" if added else f"{arg} 已在追蹤清單中"
-
-        elif command == "untrack":
-            removed = watchlist.remove_stock(user_id, arg)
-            reply = f"已將 {arg} 從追蹤清單移除" if removed else f"{arg} 不在追蹤清單中"
-
-        elif command == "list":
-            stocks = watchlist.list_stocks(user_id)
-            if stocks:
-                reply = "你的追蹤清單：\n" + "\n".join(f"• {s}" for s in stocks)
-            else:
-                reply = "追蹤清單是空的。輸入「追蹤 2330」來新增。"
-
-        elif command == "help":
-            reply = HELP_TEXT
-
-        else:
-            reply = "未知指令"
+                reply = "未知指令"
+        except Exception as e:
+            logger.error("handle_command failed: command=%s arg=%s error=%s", command, arg, e)
+            reply = f"操作失敗：{type(e).__name__}: {e}"
 
         await line_api.reply_message(
             ReplyMessageRequest(

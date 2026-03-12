@@ -19,7 +19,7 @@ STOCK_PASSWORD = os.getenv("STOCKEMAILPASSWORD", "")
 
 # Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_PUBLICKEY", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", os.getenv("SUPABASE_PUBLICKEY", ""))
 
 # Cron secret (prevent unauthorized access to /cron/notify)
 CRON_SECRET = os.getenv("CRON_SECRET", "")

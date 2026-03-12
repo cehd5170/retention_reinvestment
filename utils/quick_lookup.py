@@ -1,16 +1,19 @@
 """Direct stock lookup — bypasses LLM agent for simple queries.
 
-Runs search-stock and get-stock-price in parallel, then compares
-prices programmatically. Much faster than going through the agent.
+Runs search-stock (via subprocess) and get-stock-price in parallel,
+then compares prices programmatically. Much faster than going through the agent.
 """
 
 import asyncio
 import importlib.util
+import json
 import os
+import sys
 import time
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
+SEARCH_SCRIPT = str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
@@ -27,6 +30,9 @@ SEARCH_CONCURRENCY = _env_int("QUICK_SEARCH_CONCURRENCY", 1, 1)
 SEARCH_TIMEOUT_SECONDS = _env_int("QUICK_SEARCH_TIMEOUT_SECONDS", 55, 10)
 MAX_STOCK_IDS_PER_REQUEST = _env_int("QUICK_MAX_STOCK_IDS", 6, 1)
 
+# Global semaphore — shared across ALL requests to prevent concurrent Chromium launches
+_search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
+
 # In-memory cache: {stock_id: (expires_at_epoch, search_result_dict)}
 _search_cache: dict[str, tuple[float, dict]] = {}
 
@@ -39,10 +45,7 @@ def _import_module(name: str, path: str):
     return mod
 
 
-# Import skill modules directly (no subprocess needed)
-_search_mod = _import_module(
-    "search", str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
-)
+# get_price is lightweight (HTTP only), safe to run in-process
 _price_mod = _import_module(
     "get_price", str(SKILLS_DIR / "get-stock-price" / "scripts" / "get_price.py")
 )
@@ -83,25 +86,37 @@ def _set_cached_search(stock_id: str, result: dict):
     _search_cache[stock_id] = (time.time() + SEARCH_CACHE_TTL_SECONDS, dict(result))
 
 
-async def _run_search(stock_id: str, semaphore: asyncio.Semaphore) -> dict:
+async def _run_search(stock_id: str) -> dict:
     cached = _get_cached_search(stock_id)
     if cached is not None:
         return cached
 
-    script_timeout = int(getattr(_search_mod, "SCRIPT_TIMEOUT_SECONDS", 60))
-    effective_timeout = max(SEARCH_TIMEOUT_SECONDS, script_timeout + 5)
-
-    async with semaphore:
+    async with _search_semaphore:
         try:
-            result = await asyncio.wait_for(_search_mod.search(stock_id), timeout=effective_timeout)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, SEARCH_SCRIPT, "--stock-id", stock_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=SEARCH_TIMEOUT_SECONDS
+            )
         except asyncio.TimeoutError:
-            return {"status": "error", "message": f"盈再表查詢逾時（{effective_timeout} 秒）"}
+            proc.kill()
+            await proc.wait()
+            return {"status": "error", "message": f"盈再表查詢逾時（{SEARCH_TIMEOUT_SECONDS} 秒）"}
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
 
-    if isinstance(result, dict):
-        _set_cached_search(stock_id, result)
-        return result
+    if stdout:
+        try:
+            result = json.loads(stdout.decode())
+            if isinstance(result, dict):
+                _set_cached_search(stock_id, result)
+                return result
+        except json.JSONDecodeError:
+            pass
+
     return {"status": "error", "message": "盈再表回傳格式異常"}
 
 
@@ -111,8 +126,7 @@ async def quick_analyze(stock_ids: list[str]) -> str:
     if not normalized_stock_ids:
         return "請輸入有效股票代號（例如 2330）"
 
-    semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
-    search_tasks = [_run_search(sid, semaphore) for sid in normalized_stock_ids]
+    search_tasks = [_run_search(sid) for sid in normalized_stock_ids]
 
     # get_price is sync, run in thread pool
     loop = asyncio.get_running_loop()
