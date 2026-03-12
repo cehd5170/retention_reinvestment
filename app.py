@@ -5,6 +5,11 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 import uvicorn
@@ -192,14 +197,17 @@ async def handle_command(command: str, arg: str, user_id: str, reply_token: str)
 
 async def quick_lookup_and_reply(stock_ids: list[str], line_config, user_id: str):
     """Direct stock lookup without LLM — much faster."""
+    logger.info("quick_lookup start: user=%s stocks=%s", user_id, stock_ids)
     try:
         reply_text = await quick_analyze(stock_ids)
+        logger.info("quick_lookup done: user=%s stocks=%s", user_id, stock_ids)
     except Exception as e:
+        logger.error("quick_lookup error: user=%s stocks=%s err=%s", user_id, stock_ids, e)
         reply_text = f"查詢發生錯誤：{type(e).__name__}: {e}"
     try:
         await send_push(line_config, user_id, reply_text)
-    except Exception:
-        pass  # LINE push failed, nothing we can do
+    except Exception as e:
+        logger.error("quick_lookup push failed: user=%s err=%s", user_id, e)
 
 
 async def get_or_create_agent(app: FastAPI):
@@ -215,14 +223,17 @@ async def get_or_create_agent(app: FastAPI):
 
 async def run_agent_and_reply(app: FastAPI, user_message: str, line_config, user_id: str):
     """Run agent in background and send results via push message when done."""
+    logger.info("agent start: user=%s msg=%s", user_id, user_message[:50])
     try:
         agent = await get_or_create_agent(app)
         deps = app.state.deps
         result = await agent.run(user_message, deps=deps)
         reply_text = format_analysis(result.output)
+        logger.info("agent done: user=%s", user_id)
     except Exception as e:
         error_name = type(e).__name__
         error_text = str(e)
+        logger.error("agent error: user=%s err=%s: %s", user_id, error_name, error_text)
         if "SkillScriptExecutionError" in error_name and "scripts/search.py" in error_text and "timed out" in error_text:
             reply_text = "盈再表查詢逾時，請稍後再試（可能是網站繁忙或 cookies 失效）。"
         elif "OPENAI_API_KEY is not set" in error_text:
@@ -256,6 +267,7 @@ async def line_callback(request: Request):
         user_message = event.message.text
         user_id = event.source.user_id
         command, arg = parse_command(user_message)
+        logger.info("callback: user=%s command=%s arg=%s msg=%s", user_id, command, arg, user_message[:50])
 
         # Watchlist commands: reply immediately
         if command in ("track", "untrack", "list", "help"):
@@ -299,6 +311,7 @@ async def cron_notify(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     users = watchlist.get_all_users_with_stocks()
+    logger.info("cron_notify: %d users with tracked stocks", len(users))
     if not users:
         return {"status": "ok", "message": "No users with tracked stocks"}
 
@@ -307,22 +320,106 @@ async def cron_notify(request: Request):
 
     async def notify_user(user_id: str, stock_ids: list[str]):
         async with semaphore:
+            logger.info("cron_notify: user=%s stocks=%s", user_id, stock_ids)
             try:
                 result = await quick_analyze(stock_ids)
                 text = "📊 每日追蹤報告\n\n" + result
             except Exception as e:
+                logger.error("cron_notify error: user=%s err=%s", user_id, e)
                 text = f"每日追蹤分析失敗：{str(e)}"
             await send_push(app.state.line_config, user_id, text)
 
     tasks = [notify_user(uid, sids) for uid, sids in users.items()]
     await asyncio.gather(*tasks, return_exceptions=True)
 
+    logger.info("cron_notify done: %d users notified", len(users))
     return {"status": "ok", "users_notified": len(users)}
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# --- Debug / local test endpoint (disable in production) ---
+
+from pydantic import BaseModel as _BaseModel
+
+
+class TestRequest(_BaseModel):
+    text: str
+    user_id: str = "test_user"
+
+
+@app.post("/test", summary="模擬 LINE 訊息測試")
+async def test_message(body: TestRequest):
+    """測試用 endpoint，不需要 LINE 簽名。
+
+    text 範例：`2330`、`2330 2317`、`追蹤 2330`、`清單`、`取消追蹤 2330`、`指令`
+    """
+    import os
+    if os.getenv("RENDER"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    text = body.text.strip()
+    user_id = body.user_id
+
+    if not text:
+        return {"error": "text is required"}
+
+    command, arg = parse_command(text)
+    logger.info("/test: user=%s command=%s arg=%s text=%s", user_id, command, arg, text[:50])
+
+    if command in ("track", "untrack", "list", "help"):
+        if command == "track":
+            if not re.match(r"^\d{4,6}$", arg):
+                result = f"股票代號格式不正確：{arg}"
+            else:
+                try:
+                    added = watchlist.add_stock(user_id, arg)
+                    result = f"已將 {arg} 加入追蹤清單" if added else f"{arg} 已在追蹤清單中"
+                except Exception as e:
+                    logger.error("/test track error: %s", e)
+                    result = f"ERROR: {e}"
+        elif command == "untrack":
+            try:
+                removed = watchlist.remove_stock(user_id, arg)
+                result = f"已將 {arg} 從追蹤清單移除" if removed else f"{arg} 不在追蹤清單中"
+            except Exception as e:
+                logger.error("/test untrack error: %s", e)
+                result = f"ERROR: {e}"
+        elif command == "list":
+            try:
+                stocks = watchlist.list_stocks(user_id)
+                result = "追蹤清單：" + ", ".join(stocks) if stocks else "清單是空的"
+            except Exception as e:
+                logger.error("/test list error: %s", e)
+                result = f"ERROR: {e}"
+        else:
+            result = HELP_TEXT
+        logger.info("/test result: command=%s result=%s", command, result[:80])
+        return {"command": command, "result": result}
+
+    if command == "quick":
+        stock_ids = arg.split()
+        logger.info("/test quick start: stocks=%s", stock_ids)
+        result = await quick_analyze(stock_ids)
+        logger.info("/test quick done: stocks=%s", stock_ids)
+        return {"command": "quick", "stock_ids": stock_ids, "result": result}
+
+    if command == "query":
+        logger.info("/test agent start: text=%s", text[:50])
+        try:
+            agent = await get_or_create_agent(app)
+            deps = app.state.deps
+            result = await agent.run(text, deps=deps)
+            logger.info("/test agent done")
+            return {"command": "query", "result": format_analysis(result.output)}
+        except Exception as e:
+            logger.error("/test agent error: %s: %s", type(e).__name__, e)
+            return {"command": "query", "result": f"Agent ERROR: {type(e).__name__}: {e}"}
+
+    return {"command": command, "result": "未知指令"}
 
 
 if __name__ == "__main__":

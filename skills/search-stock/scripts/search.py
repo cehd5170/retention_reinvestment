@@ -39,6 +39,31 @@ SEARCH_BASE_URLS = [
     if url.strip()
 ]
 
+_EXTRACT_JS = """(targetId) => {
+    const rows = document.querySelectorAll('#ctl00_ContentPlaceHolder1_GridView2 tr');
+    for (const row of rows) {
+        const cardTitle = row.querySelector('.card-title');
+        if (!cardTitle) continue;
+        const stockId = cardTitle.textContent.trim();
+        if (stockId !== targetId) continue;
+        const get = (sel) => {
+            const el = row.querySelector(sel);
+            return el ? el.textContent.trim() : '';
+        };
+        return {
+            stock_id: stockId,
+            name: get('[id*="ViewlblIndustry"]'),
+            exchange: get('[id*="lblExchange"]'),
+            expected_return: get('[id*="lblIRRPortrait"]'),
+            cheap_price: get('[id*="lblNPVLOWPortrait"]'),
+            expensive_price: get('[id*="lblNPVHIGHPortrait"]'),
+            nav: get('[id*="lblNAVPortrait"]'),
+            found: true,
+        };
+    }
+    return {found: false};
+}"""
+
 
 async def _route_handler(route):
     if route.request.resource_type in {"image", "font", "media"}:
@@ -47,92 +72,49 @@ async def _route_handler(route):
     await route.continue_()
 
 
-async def _search_one_stock(page, stock_id: str, base_url: str) -> dict:
-    """Search a single stock using an existing page. Returns result dict."""
+async def _do_search_on_page(page, stock_id: str) -> dict:
+    """Type stock ID, click autocomplete, extract data. Page must be on Screener."""
+    await page.click("#ctl00_txtGlobalSearch")
+    await page.fill("#ctl00_txtGlobalSearch", "")
+    await page.type("#ctl00_txtGlobalSearch", stock_id, delay=20)
+
+    tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
     try:
-        await page.goto(
-            f"{base_url}/Screener.aspx",
-            wait_until="domcontentloaded",
-            timeout=NAVIGATION_TIMEOUT_MS,
-        )
-
-        if "login" in page.url.lower():
-            return {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
-
-        await page.wait_for_selector("#ctl00_txtGlobalSearch")
-
-        await page.click("#ctl00_txtGlobalSearch")
-        await page.fill("#ctl00_txtGlobalSearch", "")
-        await page.type("#ctl00_txtGlobalSearch", stock_id, delay=20)
-
-        tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
-        try:
-            await tw_item.first.wait_for(state="visible", timeout=5000)
-        except PlaywrightTimeoutError:
-            pass
-        count = await tw_item.count()
-
-        if count == 0:
-            return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
-
-        async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-            await tw_item.first.click()
-
-        await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2")
-
-        result = await page.evaluate("""(targetId) => {
-            const rows = document.querySelectorAll('#ctl00_ContentPlaceHolder1_GridView2 tr');
-
-            for (const row of rows) {
-                const cardTitle = row.querySelector('.card-title');
-                if (!cardTitle) continue;
-                const stockId = cardTitle.textContent.trim();
-                if (stockId !== targetId) continue;
-
-                const get = (sel) => {
-                    const el = row.querySelector(sel);
-                    return el ? el.textContent.trim() : '';
-                };
-
-                return {
-                    stock_id: stockId,
-                    name: get('[id*="ViewlblIndustry"]'),
-                    exchange: get('[id*="lblExchange"]'),
-                    expected_return: get('[id*="lblIRRPortrait"]'),
-                    cheap_price: get('[id*="lblNPVLOWPortrait"]'),
-                    expensive_price: get('[id*="lblNPVHIGHPortrait"]'),
-                    nav: get('[id*="lblNAVPortrait"]'),
-                    found: true,
-                };
-            }
-
-            return {found: false};
-        }""", stock_id)
-
-        if not result.get("found"):
-            return {"status": "error", "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"}
-
-        del result["found"]
-        return result
+        await tw_item.first.wait_for(state="visible", timeout=5000)
     except PlaywrightTimeoutError:
-        return {"status": "error", "message": f"{base_url} 載入逾時"}
-    except PlaywrightError as e:
-        return {"status": "error", "message": f"{base_url} 連線失敗：{str(e).splitlines()[0]}"}
-    except Exception as e:
-        return {"status": "error", "message": f"{type(e).__name__}: {e}"}
+        pass
+    count = await tw_item.count()
+
+    if count == 0:
+        return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
+
+    async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+        await tw_item.first.click()
+
+    await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2")
+
+    result = await page.evaluate(_EXTRACT_JS, stock_id)
+
+    if not result.get("found"):
+        return {"status": "error", "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"}
+
+    del result["found"]
+    return result
 
 
-async def _find_working_base_url(page) -> str | None:
-    """Try each base URL and return the first one that loads successfully."""
-    for base_url in SEARCH_BASE_URLS:
+async def _navigate_to_screener(page, base_urls: list[str]) -> str | None:
+    """Navigate to Screener page, trying each URL. Returns working base_url or None."""
+    for base_url in base_urls:
         try:
             await page.goto(
                 f"{base_url}/Screener.aspx",
                 wait_until="domcontentloaded",
                 timeout=NAVIGATION_TIMEOUT_MS,
             )
-            if "login" not in page.url.lower():
-                return base_url
+            if "login" in page.url.lower():
+                return None  # cookies expired
+            await page.wait_for_selector("#ctl00_txtGlobalSearch")
+            return base_url
         except (PlaywrightTimeoutError, PlaywrightError):
             continue
     return None
@@ -165,8 +147,8 @@ async def _search_batch_impl(stock_ids: list[str], state_path: str) -> list[dict
             await page.route("**/*", _route_handler)
             page.set_default_timeout(SELECTOR_TIMEOUT_MS)
 
-            # Find a working base URL first
-            base_url = await _find_working_base_url(page)
+            # Initial navigation to Screener
+            base_url = await _navigate_to_screener(page, SEARCH_BASE_URLS)
             if base_url is None:
                 if "login" in page.url.lower():
                     error = {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
@@ -174,11 +156,29 @@ async def _search_batch_impl(stock_ids: list[str], state_path: str) -> list[dict
                     error = {"status": "error", "message": "盈再表查詢失敗：所有網址均無法連線"}
                 return [error] * len(stock_ids)
 
-            # Search each stock reusing the same browser/page
             results = []
-            for stock_id in stock_ids:
-                result = await _search_one_stock(page, stock_id, base_url)
-                results.append(result)
+            for i, stock_id in enumerate(stock_ids):
+                try:
+                    # For 2nd+ stocks, go back to Screener (fast, uses browser cache)
+                    if i > 0:
+                        try:
+                            await page.go_back(wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+                            await page.wait_for_selector("#ctl00_txtGlobalSearch")
+                        except (PlaywrightTimeoutError, PlaywrightError):
+                            # Fallback: full navigation if go_back fails
+                            fallback = await _navigate_to_screener(page, [base_url])
+                            if fallback is None:
+                                results.append({"status": "error", "message": "返回搜尋頁失敗"})
+                                continue
+
+                    result = await _do_search_on_page(page, stock_id)
+                    results.append(result)
+                except PlaywrightTimeoutError:
+                    results.append({"status": "error", "message": f"{stock_id} 查詢逾時"})
+                except PlaywrightError as e:
+                    results.append({"status": "error", "message": f"{stock_id} 查詢失敗：{str(e).splitlines()[0]}"})
+                except Exception as e:
+                    results.append({"status": "error", "message": f"{stock_id}: {type(e).__name__}: {e}"})
 
             return results
         finally:
@@ -186,7 +186,7 @@ async def _search_batch_impl(stock_ids: list[str], state_path: str) -> list[dict
 
 
 async def _search_impl(stock_id: str, state_path: str) -> dict:
-    """Search a single stock. Kept for backward compatibility."""
+    """Search a single stock."""
     results = await _search_batch_impl([stock_id], state_path)
     return results[0]
 
@@ -206,7 +206,7 @@ async def search(stock_id: str) -> dict:
 
 
 async def search_batch(stock_ids: list[str]) -> list[dict]:
-    """Search multiple stocks in one browser session. Returns list of result dicts."""
+    """Search multiple stocks in one browser session."""
     state_path = get_storage_state_path()
     if not state_path:
         error = {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
