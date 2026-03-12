@@ -1,6 +1,6 @@
 """Direct stock lookup — bypasses LLM agent for simple queries.
 
-Runs search-stock (via subprocess) and get-stock-price in parallel,
+Runs search-stock (batch subprocess) and get-stock-price in parallel,
 then compares prices programmatically. Much faster than going through the agent.
 """
 
@@ -26,12 +26,11 @@ def _env_int(name: str, default: int, minimum: int) -> int:
 
 
 SEARCH_CACHE_TTL_SECONDS = _env_int("SEARCH_CACHE_TTL_SECONDS", 21600, 60)
-SEARCH_CONCURRENCY = _env_int("QUICK_SEARCH_CONCURRENCY", 1, 1)
-SEARCH_TIMEOUT_SECONDS = _env_int("QUICK_SEARCH_TIMEOUT_SECONDS", 55, 10)
+SEARCH_TIMEOUT_SECONDS = _env_int("QUICK_SEARCH_TIMEOUT_SECONDS", 120, 30)
 MAX_STOCK_IDS_PER_REQUEST = _env_int("QUICK_MAX_STOCK_IDS", 6, 1)
 
 # Global semaphore — shared across ALL requests to prevent concurrent Chromium launches
-_search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
+_search_semaphore = asyncio.Semaphore(1)
 
 # In-memory cache: {stock_id: (expires_at_epoch, search_result_dict)}
 _search_cache: dict[str, tuple[float, dict]] = {}
@@ -78,7 +77,6 @@ def _get_cached_search(stock_id: str) -> dict | None:
 
 
 def _set_cached_search(stock_id: str, result: dict):
-    # Cache successful results only.
     if result.get("status") == "error":
         return
     if not result.get("cheap_price") and not result.get("expensive_price"):
@@ -86,15 +84,30 @@ def _set_cached_search(stock_id: str, result: dict):
     _search_cache[stock_id] = (time.time() + SEARCH_CACHE_TTL_SECONDS, dict(result))
 
 
-async def _run_search(stock_id: str) -> dict:
-    cached = _get_cached_search(stock_id)
-    if cached is not None:
-        return cached
+async def _run_batch_search(stock_ids: list[str]) -> list[dict]:
+    """Run search for all stocks in ONE subprocess (one browser session)."""
+    # Check cache first, only search uncached ones
+    results: dict[str, dict] = {}
+    uncached: list[str] = []
+    for sid in stock_ids:
+        cached = _get_cached_search(sid)
+        if cached is not None:
+            results[sid] = cached
+        else:
+            uncached.append(sid)
+
+    if not uncached:
+        return [results[sid] for sid in stock_ids]
+
+    # Build command: search.py --stock-id 2330 --stock-id 2317
+    cmd = [sys.executable, SEARCH_SCRIPT]
+    for sid in uncached:
+        cmd.extend(["--stock-id", sid])
 
     async with _search_semaphore:
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, SEARCH_SCRIPT, "--stock-id", stock_id,
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -104,20 +117,41 @@ async def _run_search(stock_id: str) -> dict:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return {"status": "error", "message": f"盈再表查詢逾時（{SEARCH_TIMEOUT_SECONDS} 秒）"}
+            error = {"status": "error", "message": f"盈再表查詢逾時（{SEARCH_TIMEOUT_SECONDS} 秒）"}
+            for sid in uncached:
+                results[sid] = error
+            return [results[sid] for sid in stock_ids]
         except Exception as e:
-            return {"status": "error", "message": f"{type(e).__name__}: {e}"}
+            error = {"status": "error", "message": f"{type(e).__name__}: {e}"}
+            for sid in uncached:
+                results[sid] = error
+            return [results[sid] for sid in stock_ids]
 
+    # Parse output
     if stdout:
         try:
-            result = json.loads(stdout.decode())
-            if isinstance(result, dict):
-                _set_cached_search(stock_id, result)
-                return result
+            parsed = json.loads(stdout.decode())
+            if isinstance(parsed, dict):
+                # Single stock mode returns a dict
+                parsed = [parsed]
+            if isinstance(parsed, list) and len(parsed) == len(uncached):
+                for sid, result in zip(uncached, parsed):
+                    if isinstance(result, dict):
+                        _set_cached_search(sid, result)
+                        results[sid] = result
+                    else:
+                        results[sid] = {"status": "error", "message": "盈再表回傳格式異常"}
+            else:
+                for sid in uncached:
+                    results.setdefault(sid, {"status": "error", "message": "盈再表回傳格式異常"})
         except json.JSONDecodeError:
-            pass
+            for sid in uncached:
+                results[sid] = {"status": "error", "message": "盈再表回傳格式異常"}
+    else:
+        for sid in uncached:
+            results[sid] = {"status": "error", "message": "盈再表查詢無回應"}
 
-    return {"status": "error", "message": "盈再表回傳格式異常"}
+    return [results.get(sid, {"status": "error", "message": "查詢失敗"}) for sid in stock_ids]
 
 
 async def quick_analyze(stock_ids: list[str]) -> str:
@@ -126,14 +160,13 @@ async def quick_analyze(stock_ids: list[str]) -> str:
     if not normalized_stock_ids:
         return "請輸入有效股票代號（例如 2330）"
 
-    search_tasks = [_run_search(sid) for sid in normalized_stock_ids]
+    # Run batch search and price lookup in parallel
+    search_task = _run_batch_search(normalized_stock_ids)
 
-    # get_price is sync, run in thread pool
     loop = asyncio.get_running_loop()
     price_task = loop.run_in_executor(None, _price_mod.get_price, normalized_stock_ids)
 
-    # Wait for everything concurrently
-    search_results = await asyncio.gather(*search_tasks, return_exceptions=False)
+    search_results = await search_task
     try:
         price_data = await price_task
     except Exception:
